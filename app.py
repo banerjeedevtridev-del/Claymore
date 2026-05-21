@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import json
+import io
 
 CATEGORY_BASE_POINT = {
     "Gold": 150,
@@ -111,6 +113,17 @@ if "auction_log" not in st.session_state:
 if "player_pool" not in st.session_state:
     st.session_state.player_pool = []
 
+# Simple admin auth state
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+
+
+def check_admin(username, password):
+    # Credentials may be stored in Streamlit secrets as ADMIN_USERNAME / ADMIN_PASSWORD
+    admin_user = st.secrets.get("ADMIN_USERNAME", "admin") if hasattr(st, "secrets") else "admin"
+    admin_pass = st.secrets.get("ADMIN_PASSWORD", "adminpass") if hasattr(st, "secrets") else "adminpass"
+    return username == admin_user and password == admin_pass
+
 
 def get_category_min_bid(category):
     return CATEGORY_BASE_POINT.get(category, 50)
@@ -144,6 +157,7 @@ def add_player_to_pool(name, category, custom_base=None):
     pool = get_tournament_player_pool()
     pool.append({
         "Name": name.strip(),
+        "Skill": None,
         "Category": category,
         "Base Price": cap,
         "Salary Cap": cap,
@@ -151,7 +165,23 @@ def add_player_to_pool(name, category, custom_base=None):
     })
 
 
-def update_player_in_pool(index, name, category, custom_base=None):
+def add_player_to_pool_with_details(name, category, custom_base=None, skill=None, phone=None, picture_bytes=None):
+    cap = custom_base if custom_base is not None else get_category_min_bid(category)
+    pool = get_tournament_player_pool()
+    pool.append({
+        "Name": name.strip(),
+        "Category": category,
+        "Base Price": cap,
+        "Salary Cap": cap,
+        "Status": "Available",
+        "Skill": skill.strip() if isinstance(skill, str) else skill,
+        "Phone": phone.strip() if isinstance(phone, str) else phone,
+        "Picture": picture_bytes
+    }
+    })
+
+
+def update_player_in_pool(index, name, category, custom_base=None, skill=None, phone=None, picture_bytes=None):
     pool = get_tournament_player_pool()
     player = pool[index]
     player["Name"] = name.strip()
@@ -159,6 +189,11 @@ def update_player_in_pool(index, name, category, custom_base=None):
     cap = custom_base if custom_base is not None else get_category_min_bid(category)
     player["Base Price"] = cap
     player["Salary Cap"] = cap
+    player["Skill"] = skill.strip() if isinstance(skill, str) else skill
+    player["Phone"] = phone.strip() if isinstance(phone, str) else phone
+    # Only replace picture if a new one was provided
+    if picture_bytes is not None:
+        player["Picture"] = picture_bytes
 
 
 def remove_player_from_pool(index):
@@ -194,6 +229,40 @@ st.title("🏏 Cricket Auction App")
 st.write("Manage unlimited team auctions with category rules, budgets, and history.")
 
 st.markdown("---")
+
+# -------- Admin Login --------
+with st.expander("Admin Login / Panel", expanded=False):
+    if not st.session_state.is_admin:
+        admin_col1, admin_col2 = st.columns([2, 1])
+        with admin_col1:
+            admin_username = st.text_input("Admin username", key="admin_username")
+            admin_password = st.text_input("Admin password", type="password", key="admin_password")
+        with admin_col2:
+            if st.button("Login as Admin"):
+                if check_admin(admin_username, admin_password):
+                    st.session_state.is_admin = True
+                    st.success("Admin login successful.")
+                else:
+                    st.error("Invalid admin credentials.")
+    else:
+        st.write("You are logged in as admin.")
+        if st.button("Logout Admin"):
+            st.session_state.is_admin = False
+
+        st.markdown("**Admin Actions**")
+        if st.button("Force Reset Auction (admin)"):
+            reset_auction()
+
+        # Export data
+        if st.button("Export auction & pool JSON"):
+            export = {
+                "teams": [t.to_dict() for t in get_tournament_teams()],
+                "player_pool": get_tournament_player_pool(),
+                "auction_log": get_tournament_auction_log()
+            }
+            export_json = json.dumps(export, indent=2)
+            st.download_button("Download JSON", data=export_json, file_name="claymore_export.json", mime="application/json")
+
 
 st.subheader("Tournament Management")
 with st.expander("Create or Select Tournament"):
@@ -309,11 +378,26 @@ with st.expander("Add and Edit Players"):
         value=new_player_base,
         key="new_player_custom_base"
     )
+    new_player_skill = st.text_input("Skill (e.g. Batsman, Bowler, Allrounder)", key="new_player_skill")
+    new_player_phone = st.text_input("Phone number (optional)", key="new_player_phone")
+    new_player_picture = st.file_uploader(
+        "Player Picture (optional)",
+        type=["png", "jpg", "jpeg"],
+        key="new_player_picture"
+    )
     if st.button("Add Player to Pool"):
         if not new_player_name.strip():
             st.error("Enter a player name before adding.")
         else:
-            add_player_to_pool(new_player_name, new_player_category, custom_base_input)
+            picture_bytes = new_player_picture.read() if new_player_picture is not None else None
+            add_player_to_pool_with_details(
+                new_player_name,
+                new_player_category,
+                custom_base_input,
+                new_player_skill,
+                new_player_phone,
+                picture_bytes
+            )
             st.success(f"Added {new_player_name.strip()} ({new_player_category}) with base point {custom_base_input}.")
 
     pool = get_tournament_player_pool()
@@ -327,6 +411,16 @@ with st.expander("Add and Edit Players"):
             "Edit player name",
             value=selected_player["Name"],
             key=f"edit_player_name_{selected_index}"
+        )
+        edit_skill = st.text_input(
+            "Skill",
+            value=selected_player.get("Skill", "") or "",
+            key=f"edit_player_skill_{selected_index}"
+        )
+        edit_phone = st.text_input(
+            "Phone",
+            value=selected_player.get("Phone", "") or "",
+            key=f"edit_player_phone_{selected_index}"
         )
         edit_category = st.selectbox(
             "Edit player category",
@@ -343,6 +437,14 @@ with st.expander("Add and Edit Players"):
             value=selected_player.get("Salary Cap", edit_base),
             key=f"edit_player_custom_base_{selected_index}"
         )
+        # Show current picture if present and allow replacement
+        if selected_player.get("Picture") is not None:
+            st.image(selected_player.get("Picture"), width=120, caption="Current picture")
+        edit_player_picture = st.file_uploader(
+            "Replace player picture (optional)",
+            type=["png", "jpg", "jpeg"],
+            key=f"edit_player_picture_{selected_index}"
+        )
 
         col_edit1, col_edit2 = st.columns(2)
         with col_edit1:
@@ -350,7 +452,16 @@ with st.expander("Add and Edit Players"):
                 if not edit_name.strip():
                     st.error("Player name cannot be empty.")
                 else:
-                    update_player_in_pool(selected_index, edit_name, edit_category, edit_custom_base)
+                    picture_bytes = edit_player_picture.read() if edit_player_picture is not None else None
+                    update_player_in_pool(
+                        selected_index,
+                        edit_name,
+                        edit_category,
+                        edit_custom_base,
+                        edit_skill,
+                        edit_phone,
+                        picture_bytes
+                    )
                     st.success("Player updated.")
         with col_edit2:
             if st.button("Remove Player"):
@@ -362,7 +473,20 @@ with st.expander("Add and Edit Players"):
 st.write("### Current Player Pool")
 pool = get_tournament_player_pool()
 if pool:
-    pool_df = pd.DataFrame(pool)
+    display_list = []
+    for p in pool:
+        dp = {
+            "Name": p.get("Name"),
+            "Category": p.get("Category"),
+            "Base Price": p.get("Base Price"),
+            "Salary Cap": p.get("Salary Cap"),
+            "Status": p.get("Status"),
+            "Skill": p.get("Skill", ""),
+            "Phone": p.get("Phone", ""),
+            "Has Picture": True if p.get("Picture") is not None else False
+        }
+        display_list.append(dp)
+    pool_df = pd.DataFrame(display_list)
     st.dataframe(pool_df, use_container_width=True)
 else:
     st.write("No players added to the pool yet.")
@@ -451,6 +575,13 @@ with col1:
         selected_player_cap = selected_player["Salary Cap"]
         st.write(f"Minimum bid: {selected_player_base}")
         st.write(f"Salary cap: {selected_player_cap}")
+        # Show additional player info if available
+        if selected_player.get("Skill"):
+            st.write(f"Skill: {selected_player.get('Skill')}")
+        if selected_player.get("Phone"):
+            st.write(f"Phone: {selected_player.get('Phone')}")
+        if selected_player.get("Picture") is not None:
+            st.image(selected_player.get("Picture"), width=120, caption=selected_player.get("Name"))
     else:
         st.warning("No available players in the pool. Add players before auctioning.")
         player_name = st.text_input("Player Name", placeholder="e.g. Virat Kohli")
